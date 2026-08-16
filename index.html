@@ -42,6 +42,30 @@ input::placeholder{color:var(--faint)}
 .dot.open{background:var(--brass);box-shadow:0 0 0 3px rgba(201,162,39,.16)}
 
 /* 총계 --------------------------------------------------------- */
+.tabs{display:flex;gap:20px;padding:14px 0 2px;border-bottom:1px solid var(--line)}
+.tabs button{font-size:13.5px;color:var(--faint);padding-bottom:10px;margin-bottom:-1px;
+             border-bottom:2px solid transparent}
+.tabs button[aria-pressed="true"]{color:var(--fg);font-weight:600;border-bottom-color:var(--brass)}
+
+/* 순위 -------------------------------------------------------- */
+.rnk{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+     overflow:hidden;margin-top:14px}
+.rrow{display:flex;align-items:center;gap:11px;padding:11px 13px;border-bottom:1px solid var(--line)}
+.rrow:last-child{border-bottom:0}
+.rrow .no{width:20px;font-size:12px;color:var(--faint);text-align:right;flex:none}
+.rrow .no.top{color:var(--brass);font-weight:600}
+.rrow .who{min-width:0;flex:1}
+.rrow .who b{display:block;font-size:14px;font-weight:500;white-space:nowrap;
+             overflow:hidden;text-overflow:ellipsis}
+.rrow .who span{font-size:10.5px;color:var(--faint)}
+.rrow .val{text-align:right;flex:none}
+.rrow .val .p{font-size:13.5px}
+.rrow .val .r{font-size:11px;margin-top:1px}
+.rrow .plus{flex:none;width:26px;height:26px;border:1px solid var(--line);border-radius:8px;
+            color:var(--dim);font-size:14px;line-height:1}
+.rrow .plus.has{border-color:transparent;color:var(--brass)}
+.rnote{font-size:11.5px;color:var(--faint);margin:10px 2px 0;line-height:1.6}
+
 .hero{padding:26px 0 22px}
 .hero .lab{font-size:12px;color:var(--dim);letter-spacing:.04em}
 .hero .total{font-size:38px;font-weight:700;letter-spacing:-0.03em;margin:4px 0 10px}
@@ -128,6 +152,11 @@ input::placeholder{color:var(--faint)}
 .err{color:var(--up);font-size:12px;margin-top:9px}
 .banner{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;
         padding:10px 12px;font-size:12px;color:var(--dim);margin-bottom:12px}
+.sync{border:1px solid var(--line);border-radius:11px;padding:12px 13px;margin:14px 0 4px}
+.sync .k{font-size:11.5px;color:var(--faint);margin-bottom:4px}
+.sync .v{font-size:13px}
+.sync .acts{display:flex;gap:16px;margin-top:10px}
+.sync .acts button{font-size:12px;color:var(--dim);border-bottom:1px solid var(--line);padding-bottom:1px}
 @media (prefers-reduced-motion:no-preference){
   .card,.hero .total{transition:opacity .18s ease}
 }
@@ -141,6 +170,13 @@ input::placeholder{color:var(--faint)}
     <span class="status"><span class="dot" id="dot"></span><span id="mkt">대기</span></span>
   </div>
 
+  <div class="tabs" id="tabs">
+    <button data-v="mine" aria-pressed="true">내 종목</button>
+    <button data-v="KOSPI" aria-pressed="false">코스피 20</button>
+    <button data-v="KOSDAQ" aria-pressed="false">코스닥 20</button>
+  </div>
+
+  <div id="mineView">
   <div class="hero">
     <div class="lab">총 자산</div>
     <div class="total num" id="total">—</div>
@@ -166,6 +202,9 @@ input::placeholder{color:var(--faint)}
   </div>
 
   <div id="list"></div>
+  </div>
+
+  <div id="rankView" hidden></div>
 </div>
 
 <button class="fab" id="openAdd">종목 추가</button>
@@ -211,6 +250,10 @@ input::placeholder{color:var(--faint)}
       <input id="api" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
     </div>
     <div class="field">
+      <label for="key">접근 키 (선택)</label>
+      <input id="key" placeholder="Code.gs의 ACCESS_KEY와 같은 값" autocomplete="off">
+    </div>
+    <div class="field">
       <label for="cash">예수금 (원)</label>
       <input id="cash" inputmode="numeric" placeholder="0">
     </div>
@@ -219,6 +262,14 @@ input::placeholder{color:var(--faint)}
       <input id="sec" inputmode="numeric" placeholder="30">
     </div>
     <p class="hint">장중에만 값이 움직입니다. 시세는 네이버 증권 공개 데이터이며 체결과 몇 초 차이가 있을 수 있습니다.</p>
+    <div class="sync">
+      <div class="k">시트 동기화</div>
+      <div class="v" id="syncState">주소를 연결하면 시작됩니다</div>
+      <div class="acts">
+        <button id="pullSheet">시트에서 불러오기</button>
+        <button id="openSheet" hidden>시트 열기</button>
+      </div>
+    </div>
     <div class="err" id="cfgErr" hidden></div>
     <button class="go" id="saveCfg">저장하고 불러오기</button>
     <button class="cancel" id="demo">샘플 데이터로 화면 보기</button>
@@ -249,8 +300,61 @@ const Store = {
   }
 };
 
-let cfg = { api:'', sec:30, cash:0, holdings:[] };
+let cfg = { api:'', key:'', sec:30, cash:0, holdings:[] };
 let quotes = {}, sortKey = 'value', timer = null, demoMode = false;
+let sheetUrl = '', syncMsg = '주소를 연결하면 시작됩니다';
+
+/* ---------- 시트 동기화 ---------- */
+const Cloud = {
+  get on(){ return !!cfg.api && !demoMode; },
+
+  async pull(){
+    if (!this.on) return false;
+    setSync('시트에서 불러오는 중…');
+    try{
+      const u = cfg.api + '?action=load' + (cfg.key ? '&key=' + encodeURIComponent(cfg.key) : '');
+      const d = await (await fetch(u, {cache:'no-store'})).json();
+      if (!d.ok) throw new Error(d.error || '불러오지 못했습니다');
+      cfg.holdings = d.holdings || [];
+      cfg.cash = d.cash || 0;
+      sheetUrl = d.url || '';
+      await Store.save(cfg);
+      setSync('불러옴 ' + clock(new Date()));
+      return true;
+    }catch(e){
+      setSync('불러오기 실패 · ' + e.message);
+      return false;
+    }
+  },
+
+  async push(){
+    if (!this.on) { await Store.save(cfg); return; }
+    await Store.save(cfg);           // 먼저 기기에 남기고
+    setSync('저장 중…');
+    try{
+      const res = await fetch(cfg.api, {
+        method:'POST',
+        headers:{'Content-Type':'text/plain;charset=utf-8'},
+        body: JSON.stringify({ key:cfg.key, cash:cfg.cash, holdings:cfg.holdings })
+      });
+      const d = await res.json();
+      if (!d.ok) throw new Error(d.error || '저장하지 못했습니다');
+      sheetUrl = d.url || sheetUrl;
+      setSync('저장됨 ' + clock(new Date()));
+      if (view !== 'mine') drawRank(view);
+    }catch(e){
+      setSync('저장 실패 · ' + e.message);
+    }
+  }
+};
+
+function setSync(m){
+  syncMsg = m;
+  const el = document.getElementById('syncState');
+  if (el) el.textContent = m;
+  const btn = document.getElementById('openSheet');
+  if (btn) btn.hidden = !sheetUrl;
+}
 
 /* ---------- 표시 형식 ---------- */
 const won  = n => Math.round(n).toLocaleString('ko-KR');
@@ -401,6 +505,95 @@ function card(r, sumValue){
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+/* ---------- 시가총액 순위 ---------- */
+let view = 'mine', ranks = {}, rankBusy = false;
+
+async function loadRank(market, force){
+  const box = document.getElementById('rankView');
+  if (!cfg.api) {
+    box.innerHTML = `<div class="empty"><p>순위를 보려면 설정에서<br>시세 주소를 먼저 연결하세요.</p></div>`;
+    return;
+  }
+  const cached = ranks[market];
+  if (cached && !force && Date.now() - cached.t < 60000) { drawRank(market); return; }
+  if (rankBusy) return;
+  rankBusy = true;
+  if (!cached) box.innerHTML = `<div class="empty"><p>순위를 불러오는 중…</p></div>`;
+  try{
+    const d = await (await fetch(cfg.api + '?action=rank&market=' + market, {cache:'no-store'})).json();
+    if (!d.ok) throw new Error(d.error || '순위를 가져오지 못했습니다');
+    ranks[market] = { t: Date.now(), items: d.items || [], source: d.source, status: d.marketStatus };
+    drawRank(market);
+  }catch(e){
+    if (!cached) box.innerHTML = `<div class="empty"><p>순위를 가져오지 못했습니다.<br>${esc(e.message)}</p></div>`;
+  }finally{ rankBusy = false; }
+}
+
+function drawRank(market){
+  const d = ranks[market];
+  const box = document.getElementById('rankView');
+  if (!d) return;
+  const owned = new Set(cfg.holdings.map(h => h.code));
+
+  box.innerHTML = `<div class="rnk">` + d.items.map(r => {
+    const has = owned.has(r.code);
+    return `<div class="rrow">
+      <div class="no ${r.rank <= 3 ? 'top' : ''}">${r.rank}</div>
+      <div class="who">
+        <b>${esc(r.name)}</b>
+        <span>${r.code}${r.cap ? ' · 시총 ' + cap(r.cap) : ''}</span>
+      </div>
+      <div class="val">
+        <div class="p num">${r.price ? won(r.price) : '—'}</div>
+        <div class="r num ${tone(r.rate)}">${r.price ? pct(r.rate) : ''}</div>
+      </div>
+      <button class="plus ${has ? 'has' : ''}" data-add="${r.code}"
+        data-n="${esc(r.name)}" data-m="${market === 'KOSPI' ? '코스피' : '코스닥'}"
+        title="${has ? '보유 중 · 수정' : '내 종목에 추가'}">${has ? '✓' : '+'}</button>
+    </div>`;
+  }).join('') + `</div>
+  <p class="rnote">시가총액 순위는 1분 간격으로 갱신됩니다.${
+    d.source === 'html' ? ' (보조 경로로 조회 중)' : ''}</p>`;
+
+  box.querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
+    const code = b.dataset.add;
+    if (owned.has(code)) { openAdd(code); return; }
+    picked = { code: code, name: b.dataset.n, market: b.dataset.m };
+    editing = null;
+    document.getElementById('addTitle').textContent = '종목 추가';
+    document.getElementById('qty').value = '';
+    document.getElementById('avg').value = '';
+    document.getElementById('addErr').hidden = true;
+    document.getElementById('searchBox').hidden = true;
+    document.getElementById('qtyBox').hidden = false;
+    document.getElementById('picked').textContent = `${picked.name} · ${picked.code}`;
+    document.getElementById('vAdd').classList.add('on');
+    setTimeout(() => document.getElementById('qty').focus(), 60);
+  });
+}
+
+/** 억원 → 읽기 쉬운 표기. */
+function cap(n){
+  return n >= 10000 ? (n / 10000).toFixed(1).replace(/\.0$/, '') + '조'
+                    : won(n) + '억';
+}
+
+function setView(v){
+  view = v;
+  document.querySelectorAll('#tabs button').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.v === v)));
+  const mine = v === 'mine';
+  document.getElementById('mineView').hidden = !mine;
+  document.getElementById('rankView').hidden = mine;
+  document.getElementById('openAdd').hidden = !mine;
+  if (!mine) loadRank(v, false);
+}
+
+document.getElementById('tabs').onclick = e => {
+  const b = e.target.closest('button');
+  if (b) setView(b.dataset.v);
+};
+
 /* ---------- 종목 추가 / 수정 ---------- */
 let picked = null, editing = null;
 
@@ -474,21 +667,23 @@ document.getElementById('saveHolding').onclick = async () => {
   const rec = { code:picked.code, name:picked.name, market:picked.market, qty, avg };
   const i = cfg.holdings.findIndex(h => h.code === rec.code);
   if (i >= 0) cfg.holdings[i] = rec; else cfg.holdings.push(rec);
-  await Store.save(cfg);
   close('vAdd');
+  Cloud.push();
   refresh();
 };
 
 async function removeHolding(code){
   cfg.holdings = cfg.holdings.filter(h => h.code !== code);
   delete quotes[code];
-  await Store.save(cfg);
   render();
+  Cloud.push();
 }
 
 /* ---------- 설정 ---------- */
 document.getElementById('openCfg').onclick = () => {
   document.getElementById('api').value = cfg.api || '';
+  document.getElementById('key').value = cfg.key || '';
+  setSync(syncMsg);
   document.getElementById('sec').value = cfg.sec || 30;
   document.getElementById('cash').value = cfg.cash ? won(cfg.cash) : '';
   document.getElementById('cfgErr').hidden = true;
@@ -513,13 +708,14 @@ document.getElementById('saveCfg').onclick = async () => {
     err.textContent = 'Apps Script 웹 앱의 /exec 주소를 넣어주세요.'; err.hidden = false; return;
   }
   cfg.api = url;
+  cfg.key = document.getElementById('key').value.trim();
   cfg.sec = Math.max(10, parseInt(document.getElementById('sec').value, 10) || 30);
   cfg.cash = Math.max(0, parseInt(document.getElementById('cash').value.replace(/[^0-9]/g, ''), 10) || 0);
   demoMode = false;
-  await Store.save(cfg);
   close('vCfg');
   startTimer();
   refresh();
+  Cloud.push();
 };
 
 document.getElementById('demo').onclick = () => {
@@ -545,10 +741,18 @@ document.getElementById('demo').onclick = () => {
 
 /* ---------- 공통 ---------- */
 function close(id){ document.getElementById(id).classList.remove('on'); }
+document.getElementById('pullSheet').onclick = async () => {
+  if (await Cloud.pull()) { close('vCfg'); refresh(); }
+};
+document.getElementById('openSheet').onclick = () => {
+  if (sheetUrl) window.open(sheetUrl, '_blank', 'noopener');
+};
 document.getElementById('cancelAdd').onclick = () => close('vAdd');
 document.getElementById('cancelCfg').onclick = () => close('vCfg');
 document.getElementById('openAdd').onclick = () => openAdd(null);
-document.getElementById('reload').onclick = () => refresh();
+document.getElementById('reload').onclick = () => {
+  if (view === 'mine') refresh(); else loadRank(view, true);
+};
 document.querySelectorAll('.veil').forEach(v =>
   v.onclick = e => { if (e.target === v) v.classList.remove('on'); });
 document.getElementById('sort').onclick = e => {
@@ -562,7 +766,8 @@ document.getElementById('sort').onclick = e => {
 function startTimer(){
   clearInterval(timer);
   timer = setInterval(() => {
-    if (document.visibilityState === 'visible' && !demoMode) refresh();
+    if (document.visibilityState !== 'visible' || demoMode) return;
+    if (view === 'mine') refresh(); else loadRank(view, true);
   }, (cfg.sec || 30) * 1000);
 }
 document.addEventListener('visibilitychange', () => {
@@ -572,6 +777,8 @@ document.addEventListener('visibilitychange', () => {
 (async function init(){
   const saved = await Store.load();
   if (saved) cfg = Object.assign(cfg, saved);
+  render();                 // 기기에 남은 값으로 먼저 그리고
+  await Cloud.pull();       // 시트 내용으로 맞춘다
   startTimer();
   refresh();
 })();
