@@ -248,6 +248,7 @@ input::placeholder{color:var(--faint)}
     <div class="field">
       <label for="api">시세 주소 (Apps Script 웹 앱 /exec)</label>
       <input id="api" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
+      <p class="hint" id="apiFixed" hidden>파일에 고정된 주소를 쓰는 중입니다. 바꾸려면 index.html 상단의 DEFAULT_API 값을 수정하세요.</p>
     </div>
     <div class="field">
       <label for="key">접근 키 (선택)</label>
@@ -278,6 +279,13 @@ input::placeholder{color:var(--faint)}
 </div>
 
 <script>
+/* ---------- 시세 주소 ----------
+   여기에 값이 있으면 이 주소를 항상 사용한다.
+   기기에 저장돼 있던 옛 주소는 무시된다.
+   앱 설정에서 직접 바꾸고 싶으면 아래를 '' 로 비우면 된다. */
+const DEFAULT_API =
+  'https://script.google.com/macros/s/AKfycbza8olkwpS4C9bFn_hKtKnubwU8JSGkD0vNKlR2VmyAQfbTsUF6dg4pUVoSy-O4ltxo/exec';
+
 /* ---------- 저장소: Claude 아티팩트/브라우저 양쪽 대응 ---------- */
 const Store = {
   key: 'kr-portfolio-v1',
@@ -304,6 +312,12 @@ let cfg = { api:'', key:'', sec:30, cash:0, holdings:[] };
 let quotes = {}, sortKey = 'value', timer = null, demoMode = false;
 let sheetUrl = '', syncMsg = '주소를 연결하면 시작됩니다';
 
+/** 저장된 주소가 어떤 모양이든 요청 직전에 /exec 형태로 맞춘다. */
+function api(qs){
+  const base = String(cfg.api || '').trim().split('?')[0].replace(/\/+$/, '');
+  return base + (qs ? '?' + qs : '');
+}
+
 /* ---------- 시트 동기화 ---------- */
 const Cloud = {
   get on(){ return !!cfg.api && !demoMode; },
@@ -312,7 +326,7 @@ const Cloud = {
     if (!this.on) return false;
     setSync('시트에서 불러오는 중…');
     try{
-      const u = cfg.api + '?action=load' + (cfg.key ? '&key=' + encodeURIComponent(cfg.key) : '');
+      const u = api('action=load' + (cfg.key ? '&key=' + encodeURIComponent(cfg.key) : ''));
       const d = await (await fetch(u, {cache:'no-store'})).json();
       if (!d.ok) throw new Error(d.error || '불러오지 못했습니다');
       cfg.holdings = d.holdings || [];
@@ -332,7 +346,7 @@ const Cloud = {
     await Store.save(cfg);           // 먼저 기기에 남기고
     setSync('저장 중…');
     try{
-      const res = await fetch(cfg.api, {
+      const res = await fetch(api(), {
         method:'POST',
         headers:{'Content-Type':'text/plain;charset=utf-8'},
         body: JSON.stringify({ key:cfg.key, cash:cfg.cash, holdings:cfg.holdings })
@@ -369,7 +383,7 @@ async function refresh(){
   if (!cfg.api) { render(); return; }
   const codes = cfg.holdings.map(h => h.code).join(',');
   try{
-    const res = await fetch(cfg.api + '?codes=' + encodeURIComponent(codes), {cache:'no-store'});
+    const res = await fetch(api('codes=' + encodeURIComponent(codes)), {cache:'no-store'});
     const d = await res.json();
     if (!d.ok) throw new Error(d.error || '시세를 받지 못했습니다');
     quotes = {}; (d.items||[]).forEach(it => quotes[it.code] = it);
@@ -520,12 +534,34 @@ async function loadRank(market, force){
   rankBusy = true;
   if (!cached) box.innerHTML = `<div class="empty"><p>순위를 불러오는 중…</p></div>`;
   try{
-    const d = await (await fetch(cfg.api + '?action=rank&market=' + market, {cache:'no-store'})).json();
+    const d = await (await fetch(api('action=rank&market=' + market), {cache:'no-store'})).json();
+    // 예전 버전이 배포돼 있으면 rank 요청이 시세 조회로 흘러 빈 응답이 온다.
+    if (!d.market) {
+      box.innerHTML = `<div class="empty">
+        <p><b>순위 요청이 서버에 닿지 않았습니다.</b><br><br>
+        호출한 주소<br><span style="font-size:11px;color:var(--faint);word-break:break-all">
+        ${esc(api('action=rank&market=' + market))}</span><br><br>
+        이 주소를 브라우저에 직접 붙여넣어 확인해보세요.<br>
+        <b>tries</b> 목록이 나오면 서버는 정상입니다.<br>
+        짧은 응답만 나오면 배포 버전이 예전 것입니다.</p></div>`;
+      return;
+    }
     if (!d.ok) throw new Error(d.error || '순위를 가져오지 못했습니다');
+    if (!d.items || !d.items.length) throw new Error('순위 목록이 비어 있습니다.');
     ranks[market] = { t: Date.now(), items: d.items || [], source: d.source, status: d.marketStatus };
     drawRank(market);
   }catch(e){
-    if (!cached) box.innerHTML = `<div class="empty"><p>순위를 가져오지 못했습니다.<br>${esc(e.message)}</p></div>`;
+    if (!cached) box.innerHTML = `<div class="empty"><p>순위를 가져오지 못했습니다.<br>${esc(e.message)}</p>
+      <button class="icon" id="diagBtn">원인 확인</button></div>`;
+    const db = document.getElementById('diagBtn');
+    if (db) db.onclick = async () => {
+      db.textContent = '확인 중…';
+      try{
+        const r = await (await fetch(api('action=diag&market=' + market))).json();
+        box.innerHTML = `<div class="rnote" style="white-space:pre-wrap;font-size:11px">` +
+          esc(JSON.stringify(r, null, 2)) + `</div>`;
+      }catch(err){ db.textContent = '확인 실패'; }
+    };
   }finally{ rankBusy = false; }
 }
 
@@ -634,7 +670,7 @@ document.getElementById('q').addEventListener('input', e => {
   if (v.length < 2 || !cfg.api) { document.getElementById('results').hidden = true; return; }
   searchTimer = setTimeout(async () => {
     try{
-      const res = await fetch(cfg.api + '?action=search&q=' + encodeURIComponent(v));
+      const res = await fetch(api('action=search&q=' + encodeURIComponent(v)));
       const d = await res.json();
       showResults(d.items || []);
     }catch(e){ document.getElementById('results').hidden = true; }
@@ -683,6 +719,8 @@ async function removeHolding(code){
 document.getElementById('openCfg').onclick = () => {
   document.getElementById('api').value = cfg.api || '';
   document.getElementById('key').value = cfg.key || '';
+  document.getElementById('apiFixed').hidden = !DEFAULT_API;
+  document.getElementById('api').readOnly = !!DEFAULT_API;
   setSync(syncMsg);
   document.getElementById('sec').value = cfg.sec || 30;
   document.getElementById('cash').value = cfg.cash ? won(cfg.cash) : '';
@@ -702,12 +740,21 @@ document.getElementById('editCash').onclick = () => {
 };
 
 document.getElementById('saveCfg').onclick = async () => {
-  const url = document.getElementById('api').value.trim();
   const err = document.getElementById('cfgErr');
+  // 끝의 여분 슬래시·쿼리를 떼어내고 /exec 로 맞춘다.
+  let url = document.getElementById('api').value.trim().split('?')[0].replace(/\/+$/, '');
   if (url && !/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) {
     err.textContent = 'Apps Script 웹 앱의 /exec 주소를 넣어주세요.'; err.hidden = false; return;
   }
-  cfg.api = url;
+  if (url && /\/dev$/.test(url)) {
+    err.textContent = '/dev 주소는 본인 로그인 세션에서만 동작합니다. /exec 주소를 쓰세요.';
+    err.hidden = false; return;
+  }
+  if (url && !/\/exec$/.test(url)) {
+    err.textContent = '주소가 /exec 로 끝나야 합니다.'; err.hidden = false; return;
+  }
+  document.getElementById('api').value = url;
+  cfg.api = DEFAULT_API || url;
   cfg.key = document.getElementById('key').value.trim();
   cfg.sec = Math.max(10, parseInt(document.getElementById('sec').value, 10) || 30);
   cfg.cash = Math.max(0, parseInt(document.getElementById('cash').value.replace(/[^0-9]/g, ''), 10) || 0);
@@ -777,6 +824,8 @@ document.addEventListener('visibilitychange', () => {
 (async function init(){
   const saved = await Store.load();
   if (saved) cfg = Object.assign(cfg, saved);
+  if (DEFAULT_API) cfg.api = DEFAULT_API;          // 박아둔 주소가 항상 우선
+  else if (cfg.api) cfg.api = cfg.api.split('?')[0].replace(/\/+$/, '');
   render();                 // 기기에 남은 값으로 먼저 그리고
   await Cloud.pull();       // 시트 내용으로 맞춘다
   startTimer();
