@@ -329,11 +329,18 @@ const Cloud = {
       const u = api('action=load' + (cfg.key ? '&key=' + encodeURIComponent(cfg.key) : ''));
       const d = await (await fetch(u, {cache:'no-store'})).json();
       if (!d.ok) throw new Error(d.error || '불러오지 못했습니다');
+      const before = cfg.holdings || [];
+      const sheetCodes = new Set((d.holdings || []).map(h => h.code));
+      const missing = before.filter(h => !sheetCodes.has(h.code));
+
       cfg.holdings = d.holdings || [];
       cfg.cash = d.cash || 0;
       sheetUrl = d.url || '';
       await Store.save(cfg);
-      setSync('불러옴 ' + clock(new Date()));
+      setSync(`불러옴 ${clock(new Date())} · ${cfg.holdings.length}종목`);
+
+      // 시트에 없는데 기기에는 있던 종목은 버리지 않고 되돌릴 기회를 준다.
+      if (missing.length) showRecover(missing);
       return true;
     }catch(e){
       setSync('불러오기 실패 · ' + e.message);
@@ -341,23 +348,42 @@ const Cloud = {
     }
   },
 
-  async push(){
-    if (!this.on) { await Store.save(cfg); return; }
-    await Store.save(cfg);           // 먼저 기기에 남기고
+  /** 저장 요청은 한 번에 하나만. 겹치면 마지막 상태로 한 번 더 보낸다. */
+  _busy: false, _again: false, _timer: null,
+
+  push(){
+    Store.save(cfg);                       // 기기 저장은 즉시
+    if (!this.on) return;
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._run(), 400);
+  },
+
+  async _run(){
+    if (this._busy) { this._again = true; return; }
+    this._busy = true;
     setSync('저장 중…');
     try{
+      const payload = {
+        key: cfg.key, rev: Date.now(),
+        cash: cfg.cash,
+        holdings: cfg.holdings.map(h => ({...h}))   // 보내는 순간의 상태를 고정
+      };
       const res = await fetch(api(), {
         method:'POST',
         headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body: JSON.stringify({ key:cfg.key, cash:cfg.cash, holdings:cfg.holdings })
+        body: JSON.stringify(payload)
       });
       const d = await res.json();
       if (!d.ok) throw new Error(d.error || '저장하지 못했습니다');
       sheetUrl = d.url || sheetUrl;
-      setSync('저장됨 ' + clock(new Date()));
+      setSync(d.skipped ? '최신 상태 유지됨'
+                        : `저장됨 ${clock(new Date())} · ${d.count}종목`);
       if (view !== 'mine') drawRank(view);
     }catch(e){
       setSync('저장 실패 · ' + e.message);
+    }finally{
+      this._busy = false;
+      if (this._again) { this._again = false; this._run(); }
     }
   }
 };
@@ -541,6 +567,28 @@ function pdet(r){
 }
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/** 시트에 없던 종목을 되돌릴 수 있게 안내한다. */
+function showRecover(missing){
+  const host = document.getElementById('mineView');
+  const old = document.getElementById('recover');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.id = 'recover';
+  el.className = 'banner';
+  el.style.marginTop = '10px';
+  el.innerHTML = `기기에만 있던 ${missing.length}종목이 시트에 없습니다 · ` +
+    `<b>${missing.map(m => esc(m.name || m.code)).join(', ')}</b> ` +
+    `<button id="doRecover" style="color:var(--brass);border-bottom:1px solid var(--line)">되돌리기</button>`;
+  host.insertBefore(el, host.firstChild);
+  document.getElementById('doRecover').onclick = () => {
+    const have = new Set(cfg.holdings.map(h => h.code));
+    missing.forEach(m => { if (!have.has(m.code)) cfg.holdings.push(m); });
+    el.remove();
+    render();
+    Cloud.push();
+  };
+}
 
 /* ---------- 시가총액 순위 ---------- */
 let view = 'mine', ranks = {}, rankBusy = false;
@@ -730,6 +778,12 @@ document.getElementById('saveHolding').onclick = async () => {
   Cloud.push();
   refresh();
 };
+
+/** 화면을 닫기 전 저장이 끝나길 기다린다. */
+async function flushSave(){
+  clearTimeout(Cloud._timer);
+  await Cloud._run();
+}
 
 async function removeHolding(code){
   cfg.holdings = cfg.holdings.filter(h => h.code !== code);
