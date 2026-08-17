@@ -311,6 +311,36 @@ const Store = {
 let cfg = { api:'', key:'', sec:30, cash:0, holdings:[] };
 let quotes = {}, sortKey = 'value', timer = null, demoMode = false;
 let sheetUrl = '', syncMsg = '주소를 연결하면 시작됩니다';
+let lastIndices = [], lastStatus = '';
+
+/* ---------- 직전 시세 스냅샷 ----------
+   앱을 열자마자 GAS 응답(콜드스타트 1~3초)을 기다리지 않고
+   마지막으로 봤던 숫자를 먼저 그리기 위한 캐시.
+   새 시세가 도착하면 조용히 갈아끼운다. */
+const QCache = {
+  key: 'kr-portfolio-snap-v1',
+  async load(){
+    try{
+      if (window.storage){
+        const r = await window.storage.get(this.key);
+        return r ? JSON.parse(r.value) : null;
+      }
+      const raw = localStorage.getItem(this.key);
+      return raw ? JSON.parse(raw) : null;
+    }catch(e){ return null; }
+  },
+  save(v){
+    try{
+      const s = JSON.stringify(v);
+      if (window.storage) window.storage.set(this.key, s);
+      else localStorage.setItem(this.key, s);
+    }catch(e){}
+  }
+};
+function saveSnap(){
+  if (demoMode) return;
+  QCache.save({ t: Date.now(), quotes, indices: lastIndices, status: lastStatus, ranks });
+}
 
 /** 저장된 주소가 어떤 모양이든 요청 직전에 /exec 형태로 맞춘다. */
 function api(qs){
@@ -419,8 +449,10 @@ async function refresh(){
     const d = await res.json();
     if (!d.ok) throw new Error(d.error || '시세를 받지 못했습니다');
     quotes = {}; (d.items||[]).forEach(it => quotes[it.code] = it);
-    drawStrip(d.indices || [], d.marketStatus);
+    lastIndices = d.indices || []; lastStatus = d.marketStatus;
+    drawStrip(lastIndices, lastStatus);
     document.getElementById('stamp').textContent = clock(new Date());
+    saveSnap();
   }catch(e){
     document.getElementById('stamp').textContent = '연결 실패';
     console.warn(e);
@@ -600,7 +632,8 @@ async function loadRank(market, force){
     return;
   }
   const cached = ranks[market];
-  if (cached && !force && Date.now() - cached.t < 60000) { drawRank(market); return; }
+  if (cached) drawRank(market);                        // 이전 값부터 즉시 표시
+  if (cached && !force && Date.now() - cached.t < 60000) return;
   if (rankBusy) return;
   rankBusy = true;
   if (!cached) box.innerHTML = `<div class="empty"><p>순위를 불러오는 중…</p></div>`;
@@ -621,6 +654,7 @@ async function loadRank(market, force){
     if (!d.items || !d.items.length) throw new Error('순위 목록이 비어 있습니다.');
     ranks[market] = { t: Date.now(), items: d.items || [], source: d.source, status: d.marketStatus };
     drawRank(market);
+    saveSnap();
   }catch(e){
     if (!cached) box.innerHTML = `<div class="empty"><p>순위를 가져오지 못했습니다.<br>${esc(e.message)}</p>
       <button class="icon" id="diagBtn">원인 확인</button></div>`;
@@ -903,10 +937,21 @@ document.addEventListener('visibilitychange', () => {
   if (saved) cfg = Object.assign(cfg, saved);
   if (DEFAULT_API) cfg.api = DEFAULT_API;          // 박아둔 주소가 항상 우선
   else if (cfg.api) cfg.api = cfg.api.split('?')[0].replace(/\/+$/, '');
-  render();                 // 기기에 남은 값으로 먼저 그리고
-  await Cloud.pull();       // 시트 내용으로 맞춘다
-  startTimer();
+
+  // 1) 직전 스냅샷 복원 → 서버 응답 전에 이전 숫자부터 표시
+  const snap = await QCache.load();
+  if (snap && snap.quotes && Object.keys(snap.quotes).length){
+    quotes = snap.quotes;
+    if (snap.ranks) Object.assign(ranks, snap.ranks);
+    if (snap.indices && snap.indices.length) drawStrip(snap.indices, snap.status);
+    document.getElementById('stamp').textContent = clock(new Date(snap.t)) + ' 저장분';
+  }
+  render();
+
+  // 2) 시세 갱신과 시트 동기화를 병렬로 (기존엔 시트 완료를 기다린 뒤 시세를 불렀음)
   refresh();
+  Cloud.pull().then(ok => { if (ok) { render(); refresh(); } });
+  startTimer();
 })();
 </script>
 </body>
